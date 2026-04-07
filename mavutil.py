@@ -7,7 +7,7 @@ Released under GNU LGPL version 3 or later
 '''
 
 import socket, math, struct, time, os, fnmatch, array, sys, errno
-import select
+import asyncio
 import copy
 import json
 import re
@@ -337,16 +337,34 @@ class mavfile(object):
         raise RuntimeError('no write() method supplied')
 
 
-    def select(self, timeout):
+    async def select(self, timeout):
         '''wait for up to timeout seconds for more data'''
         if self.fd is None:
-            time.sleep(min(timeout,0.5))
+            await asyncio.sleep(min(timeout, 0.5))
             return True
+
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        # callback
+        def on_readable():
+            if not future.done():
+                future.set_result(True)
+
         try:
-            (rin, win, xin) = select.select([self.fd], [], [], timeout)
-        except select.error:
+            loop.add_reader(self.fd, on_readable)
+            await asyncio.wait_for(future, timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
             return False
-        return len(rin) == 1
+        except Exception:
+            return False
+        finally:
+            # unregister the file descriptor
+            try:
+                loop.remove_reader(self.fd)
+            except Exception:
+                pass
 
     def pre_message(self):
         '''default pre message call'''
@@ -503,7 +521,7 @@ class mavfile(object):
                 if numnew == 0:
                     return None
                 
-    def recv_match(self, condition=None, type=None, blocking=False, timeout=None):
+    async def recv_match(self, condition=None, type=None, blocking=False, timeout=None):
         '''recv the next MAVLink message that matches the given condition
         type can be a string or a list of strings'''
         if type is not None and not isinstance(type, list) and not isinstance(type, set):
@@ -522,9 +540,9 @@ class mavfile(object):
                     for hook in self.idle_hooks:
                         hook(self)
                     if timeout is None:
-                        self.select(0.05)
+                        await self.select(0.05)
                     else:
-                        self.select(timeout/2)
+                        await self.select(timeout/2)
                     continue
                 return None
             if type is not None and not m.get_type() in type:
@@ -557,9 +575,9 @@ class mavfile(object):
         '''start logging raw bytes to the given logfile, without timestamps'''
         self.logfile_raw = open(logfile, mode=mode)
 
-    def wait_heartbeat(self, blocking=True, timeout=None):
+    async def wait_heartbeat(self, blocking=True, timeout=None):
         '''wait for a heartbeat so we know the target system IDs'''
-        return self.recv_match(type='HEARTBEAT', blocking=blocking, timeout=timeout)
+        return await self.recv_match(type='HEARTBEAT', blocking=blocking, timeout=timeout)
 
     def param_fetch_all(self):
         '''initiate fetch of all parameters'''
@@ -624,12 +642,12 @@ class mavfile(object):
         else:
             self.mav.waypoint_set_current_send(self.target_system, self.target_component, seq)
 
-    def waypoint_current(self):
+    async def waypoint_current(self):
         '''return current waypoint'''
         if self.mavlink10():
-            m = self.recv_match(type='MISSION_CURRENT', blocking=True)
+            m = await self.recv_match(type='MISSION_CURRENT', blocking=True)
         else:
-            m = self.recv_match(type='WAYPOINT_CURRENT', blocking=True)
+            m = await self.recv_match(type='WAYPOINT_CURRENT', blocking=True)
         return m.seq
 
     def waypoint_count_send(self, seq):
@@ -815,21 +833,21 @@ class mavfile(object):
                                        mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, 0,
                                        param1, 0, 0, 0, 0, param6, 0)
 
-    def wait_gps_fix(self):
-        self.recv_match(type='VFR_HUD', blocking=True)
+    async def wait_gps_fix(self):
+        await self.recv_match(type='VFR_HUD', blocking=True)
         if self.mavlink10():
-            self.recv_match(type='GPS_RAW_INT', blocking=True,
+            await self.recv_match(type='GPS_RAW_INT', blocking=True,
                             condition='GPS_RAW_INT.fix_type>=3 and GPS_RAW_INT.lat != 0')
         else:
-            self.recv_match(type='GPS_RAW', blocking=True,
+            await self.recv_match(type='GPS_RAW', blocking=True,
                             condition='GPS_RAW.fix_type>=2 and GPS_RAW.lat != 0')
 
-    def location(self, relative_alt=False):
+    async def location(self, relative_alt=False):
         '''return current location'''
-        self.wait_gps_fix()
+        await self.wait_gps_fix()
         # wait for another VFR_HUD, to ensure we have correct altitude
-        self.recv_match(type='VFR_HUD', blocking=True)
-        self.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
+        await self.recv_match(type='VFR_HUD', blocking=True)
+        await self.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
         if relative_alt:
             alt = self.messages['GLOBAL_POSITION_INT'].relative_alt*0.001
         else:
@@ -875,17 +893,17 @@ class mavfile(object):
         '''return true if motors armed'''
         return self.sysid_state[self.sysid].armed
 
-    def motors_armed_wait(self):
+    async def motors_armed_wait(self):
         '''wait for motors to be armed'''
         while True:
-            m = self.wait_heartbeat()
+            m = await self.wait_heartbeat()
             if self.motors_armed():
                 return
 
-    def motors_disarmed_wait(self):
+    async def motors_disarmed_wait(self):
         '''wait for motors to be disarmed'''
         while True:
-            m = self.wait_heartbeat()
+            m = await self.wait_heartbeat()
             if not self.motors_armed():
                 return
 
@@ -1652,7 +1670,7 @@ class mavmmaplog(mavlogfile):
             self.offset = smallest_offset
             self.f.seek(smallest_offset)
 
-    def recv_match(self, condition=None, type=None, blocking=False, timeout=None):
+    async def recv_match(self, condition=None, type=None, blocking=False, timeout=None):
         '''recv the next message that matches the given condition
         type can be a string or a list of strings'''
         if type is not None:
@@ -1669,9 +1687,9 @@ class mavmmaplog(mavlogfile):
                     for hook in self.idle_hooks:
                         hook(self)
                     if timeout is None:
-                        self.select(0.05)
+                        await self.select(0.05)
                     else:
-                        self.select(timeout/2)
+                        await self.select(timeout/2)
                     continue
                 return None
             if type is not None and not m.get_type() in type:
@@ -1684,7 +1702,7 @@ class mavmmaplog(mavlogfile):
                     continue
             return m
         
-    def flightmode_list(self):
+    async def flightmode_list(self):
         '''return an array of tuples for all flightmodes in log. Tuple is (modestring, t0, t1)'''
         tstamp = None
         fmode = None
@@ -1693,7 +1711,7 @@ class mavmmaplog(mavlogfile):
             self._flightmodes = []
             types = set(['HEARTBEAT'])
             while True:
-                m = self.recv_match(type=types)
+                m = await self.recv_match(type=types)
                 if m is None:
                     break
                 tstamp = m._timestamp
@@ -2614,21 +2632,28 @@ def mode_string_acm(mode_number):
 
 class MavlinkSerialPort(object):
         '''an object that looks like a serial port, but
-        transmits using mavlink SERIAL_CONTROL packets'''
+        transmits using mavlink SERIAL_CONTROL packets
+        
+        Warning: After creating an instance of MavlinkSerialPort, always do "await port.connect()"'''
         def __init__(self, portname, baudrate, devnum=0, devbaud=0, timeout=3, debug=0):
-                from . import mavutil
-
-                self.baudrate = 0
+                '''Warning: After creating an instance of MavlinkSerialPort, always do "await port.connect()"'''
+                self.baudrate = baudrate
                 self.timeout = timeout
                 self._debug = debug
                 self.buf = bytearray()
                 self.port = devnum
-                self.debug("Connecting with MAVLink to %s ..." % portname)
-                self.mav = mavutil.mavlink_connection(portname, autoreconnect=True, baud=baudrate)
-                self.mav.wait_heartbeat()
+                self.portname = portname
+                self.devbaud = devbaud
+
+        async def connect(self):
+                from . import mavutil
+
+                self.debug("Connecting with MAVLink to %s ..." % self.portname)
+                self.mav = mavutil.mavlink_connection(self.portname, autoreconnect=True, baud=self.baudrate)
+                await self.mav.wait_heartbeat()
                 self.debug("HEARTBEAT OK\n")
-                if devbaud != 0:
-                    self.setBaudrate(devbaud)
+                if self.devbaud != 0:
+                    await self.setBaudrate(self.devbaud)
                 self.debug("Locked serial device\n")
 
         def debug(self, s, level=1):
@@ -2654,12 +2679,12 @@ class MavlinkSerialPort(object):
                                                          buf)
                         b = b[n:]
 
-        def _recv(self):
+        async def _recv(self):
                 '''read some bytes into self.buf'''
                 from . import mavutil
                 start_time = time.time()
                 while time.time() < start_time + self.timeout:
-                        m = self.mav.recv_match(condition='SERIAL_CONTROL.count!=0',
+                        m = await self.mav.recv_match(condition='SERIAL_CONTROL.count!=0',
                                                 type='SERIAL_CONTROL', blocking=False, timeout=0)
                         if m is not None and m.count != 0:
                                 break
@@ -2669,7 +2694,7 @@ class MavlinkSerialPort(object):
                                                          0,
                                                          0,
                                                          0, [0]*70)
-                        m = self.mav.recv_match(condition='SERIAL_CONTROL.count!=0',
+                        m = await self.mav.recv_match(condition='SERIAL_CONTROL.count!=0',
                                                 type='SERIAL_CONTROL', blocking=True, timeout=0.01)
                         if m is not None and m.count != 0:
                                 break
@@ -2679,10 +2704,10 @@ class MavlinkSerialPort(object):
                         data = m.data[:m.count]
                         self.buf.extend(data)
 
-        def read(self, n):
+        async def read(self, n):
                 '''read some bytes'''
                 if len(self.buf) == 0:
-                        self._recv()
+                        await self._recv()
                 if len(self.buf) > 0:
                         if n > len(self.buf):
                                 n = len(self.buf)
@@ -2691,17 +2716,17 @@ class MavlinkSerialPort(object):
                         return ret
                 return bytearray()
 
-        def flushInput(self):
+        async def flushInput(self):
                 '''flush any pending input'''
                 self.buf = bytearray()
                 saved_timeout = self.timeout
                 self.timeout = 0.5
-                self._recv()
+                await self._recv()
                 self.timeout = saved_timeout
                 self.buf = bytearray()
                 self.debug("flushInput")
 
-        def setBaudrate(self, baudrate):
+        async def setBaudrate(self, baudrate):
                 '''set baudrate'''
                 from . import mavutil
                 if self.baudrate == baudrate:
@@ -2712,7 +2737,7 @@ class MavlinkSerialPort(object):
                                                  0,
                                                  self.baudrate,
                                                  0, [0]*70)
-                self.flushInput()
+                await self.flushInput()
                 self.debug("Changed baudrate %u" % self.baudrate)
 
 def decode_bitmask(messagetype, field, value):
