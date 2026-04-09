@@ -12,9 +12,10 @@ via a local TCP connection.
 from pymavlink import mavutil
 from argparse import ArgumentParser
 import socket
+import asyncio
 
 
-def main():
+async def main():
     parser = ArgumentParser(description=__doc__)
     parser.add_argument("--mavport", required=True,
                       help="Mavlink port name")
@@ -40,6 +41,7 @@ def main():
     mav_serialport = mavutil.MavlinkSerialPort(
         args.mavport, args.mavbaud,
         devnum=args.devnum, devbaud=args.devbaud, debug=args.debug)
+    await mav_serialport.connect()
 
     listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -71,7 +73,7 @@ def main():
         except socket.error:
             pass
 
-        data = mav_serialport.read(args.buffsize)
+        data = await mav_serialport.read(args.buffsize)
         if data:
             if logout:
                 logout.write(data)
@@ -81,4 +83,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())

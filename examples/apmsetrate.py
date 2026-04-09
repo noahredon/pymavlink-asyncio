@@ -5,6 +5,7 @@ set stream rate on an APM
 '''
 
 import sys
+import asyncio
 
 from argparse import ArgumentParser
 parser = ArgumentParser(description=__doc__)
@@ -21,16 +22,16 @@ args = parser.parse_args()
 
 from pymavlink import mavutil
 
-def wait_heartbeat(m):
+async def wait_heartbeat(m):
     '''wait for a heartbeat so we know the target system IDs'''
     print("Waiting for APM heartbeat")
-    m.wait_heartbeat()
+    await m.wait_heartbeat()
     print("Heartbeat from APM (system %u component %u)" % (m.target_system, m.target_system))
 
-def show_messages(m):
+async def show_messages(m):
     '''show incoming mavlink messages'''
     while True:
-        msg = m.recv_match(blocking=True)
+        msg = await m.recv_match(blocking=True)
         if not msg:
             return
         if msg.get_type() == "BAD_DATA":
@@ -40,15 +41,19 @@ def show_messages(m):
         else:
             print(msg)
 
-# create a mavlink serial instance
-master = mavutil.mavlink_connection(args.device, baud=args.baudrate)
+async def main():
+    # create a mavlink serial instance
+    master = mavutil.mavlink_connection(args.device, baud=args.baudrate)
 
-# wait for the heartbeat msg to find the system ID
-wait_heartbeat(master)
+    # wait for the heartbeat msg to find the system ID
+    await wait_heartbeat(master)
 
-print("Sending all stream request for rate %u" % args.rate)
-for i in range(0, 3):
-    master.mav.request_data_stream_send(master.target_system, master.target_component,
-                                        mavutil.mavlink.MAV_DATA_STREAM_ALL, args.rate, 1)
-if args.showmessages:
-    show_messages(master)
+    print("Sending all stream request for rate %u" % args.rate)
+    for i in range(0, 3):
+        master.mav.request_data_stream_send(master.target_system, master.target_component,
+                                            mavutil.mavlink.MAV_DATA_STREAM_ALL, args.rate, 1)
+    if args.showmessages:
+        await show_messages(master)
+
+if __name__ == "__main__":
+    asyncio.run(main())

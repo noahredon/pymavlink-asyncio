@@ -9,6 +9,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 '''
 
 import time
+import asyncio
 
 from argparse import ArgumentParser
 
@@ -270,12 +271,12 @@ class FlightcontrollerInfo:  # pylint: disable=too-many-instance-attributes
                      },
         }
 
-def collect_banner_messages(master) -> List[str]:
+async def collect_banner_messages(master) -> List[str]:
     '''Collect banner information from the flight controller'''
     start_time = time.time()
     banner_msgs = []
     while True:
-        msg = master.recv_match(blocking=False)
+        msg = await master.recv_match(blocking=False)
         if msg is not None:
             if msg.get_type() == 'STATUSTEXT':
                 if banner_msgs:
@@ -347,7 +348,7 @@ def process_autopilot_version(info, m, banner_msgs) -> str:
         info.product = fc_product  # force the one from the banner because it is more reliable
     return ""
 
-def main():
+async def main():
     '''Print banner information from the flight controller'''
     parser = ArgumentParser(description=__doc__)
     parser.add_argument("--baudrate", type=int,
@@ -362,17 +363,17 @@ def main():
     connection = mavutil.mavlink_connection(args.device, baud=args.baudrate, source_system=args.SOURCE_SYSTEM)
 
     try:
-        m = connection.wait_heartbeat(timeout=timeout)  # Wait for heartbeat to confirm connection
+        m = await connection.wait_heartbeat(timeout=timeout)  # Wait for heartbeat to confirm connection
         info = FlightcontrollerInfo()
         info.set_system_id_and_component_id(m.get_srcSystem(), m.get_srcComponent())
         info.set_autopilot(m.autopilot)
         info.set_type(m.type)
 
         request_banner(connection)
-        banner_msgs = collect_banner_messages(connection)
+        banner_msgs = await collect_banner_messages(connection)
 
         request_message(connection, mavutil.mavlink.MAVLINK_MSG_ID_AUTOPILOT_VERSION)
-        m = connection.recv_match(type='AUTOPILOT_VERSION', blocking=True, timeout=timeout)
+        m = await connection.recv_match(type='AUTOPILOT_VERSION', blocking=True, timeout=timeout)
         print(process_autopilot_version(info, m, banner_msgs))
 
         info_dict = info.get_info()
@@ -391,4 +392,4 @@ def main():
         connection.close()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

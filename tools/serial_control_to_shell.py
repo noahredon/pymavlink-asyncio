@@ -6,6 +6,7 @@ Copyright Peter Barker 2021
 
 import optparse
 import os
+import asyncio
 import pymavlink
 import re
 import select
@@ -55,11 +56,11 @@ class SerialControlToShell(object):
         fcntl.fcntl(self.shell.stdout.fileno(), fcntl.F_SETFL, os.O_NONBLOCK)
         fcntl.fcntl(self.shell.stderr.fileno(), fcntl.F_SETFL, os.O_NONBLOCK)
 
-    def run(self):
+    async def run(self):
         self.open_shell()
         os.environ["PYTHONUNBUFFERED"]="1"
         while True:
-            m = self.mav.recv_match(type="SERIAL_CONTROL", timeout=1000)
+            m = await self.mav.recv_match(type="SERIAL_CONTROL", timeout=1000)
             self.send_heartbeats()
             shell_failure = self.shell.poll()
             if shell_failure is not None:
@@ -94,7 +95,7 @@ class SerialControlToShell(object):
                 )
 
             if m is None:
-                time.sleep(0.1)
+                await asyncio.sleep(0.1)
                 continue
             if m.device != self.serial_control_dev:
                 continue
@@ -106,8 +107,7 @@ class SerialControlToShell(object):
             text = re.sub("\r\n", "\n", text)  # not quite right, doesn't take into account \r at end of data
             self.shell.stdin.write(text)
 
-if __name__ == '__main__':
-
+async def main():
     parser = optparse.OptionParser("bisect.py ")
 
     parser.add_option("", "--system-id",
@@ -129,4 +129,7 @@ if __name__ == '__main__':
         system_id=opts.system_id,
         component_id=opts.component_id,
     )
-    s.run()
+    await s.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
