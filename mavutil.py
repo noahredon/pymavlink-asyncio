@@ -1243,9 +1243,7 @@ class mavmcast(mavfile):
     
 
 class mavtcp(mavfile):
-    '''a TCP mavlink socket
-    
-    Warning: After creating an instance of mavtcp, always do "mavtcp.initialize()"'''
+    '''a TCP mavlink socket'''
     def __init__(self,
                  device,
                  autoreconnect=False,
@@ -1253,7 +1251,6 @@ class mavtcp(mavfile):
                  source_component=0,
                  retries=6,
                  use_native=default_native):
-        '''Warning: After creating an instance of mavtcp, always do "mavtcp.initialize()"'''
         a = device.split(':')
         if len(a) != 2:
             raise ValueError("TCP ports must be specified as host:port")
@@ -1262,21 +1259,32 @@ class mavtcp(mavfile):
         self.autoreconnect = autoreconnect
 
         self.retries = retries
+        self._is_ready = False
 
-        self._device_name = device
-        self._source_system = source_system
-        self._source_component = source_component
-        self._use_native = use_native
+        # Create initial socket to get a valid fileno() immediately
+        self.port = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.port.setblocking(0)
 
-    async def initialize(self):
-        await self.do_connect()
+        # Launch the connection loop in the background
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        loop.create_task(self.do_connect())
 
-        mavfile.__init__(self, self.port.fileno(), "tcp:" + self._device_name, source_system=self._source_system, source_component=self._source_component, use_native=self._use_native)
+        mavfile.__init__(self, self.port.fileno(), "tcp:" + device, source_system=source_system, source_component=source_component, use_native=use_native)
 
     async def do_connect(self):
-        loop = asyncio.get_running_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+
         if sys.platform != 'darwin':
-            self.port = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if self.port is None:
+                self.port = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.port.setblocking(0)
+                self.fd = self.port.fileno()
         retries = self.retries
         if retries <= 0:
             # try to connect at least once:
@@ -1285,138 +1293,92 @@ class mavtcp(mavfile):
             retries -= 1
             try:
                 if sys.platform == 'darwin':
+                    if self.port is not None:
+                        self.port.close()
                     self.port = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.port.setblocking(0)
+                    self.port.setblocking(0)
+                    self.fd = self.port.fileno()
                 await loop.sock_connect(self.port, self.destination_addr)
+                self._is_ready = True
                 break
             except Exception as e:
                 if retries == 0:
                     if self.port is not None:
                         self.port.close()
                         self.port = None
+                    print(f"TCP connection failed permanently: {e}")
                     raise e
                 print(e, "sleeping")
                 await asyncio.sleep(1)
-        set_close_on_exec(self.port.fileno())
-        self.port.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
+        if self.port is not None:
+            self.port.setblocking(0)
+            set_close_on_exec(self.port.fileno())
+            self.port.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
 
     def close(self):
-        self.port.close()
+        self._is_ready = False
+        if self.port is not None:
+            self.port.close()
 
-    async def handle_disconnect(self):
+    def handle_disconnect(self):
         print("Connection reset or closed by peer on TCP socket")
-        await self.reconnect()
+        self.reconnect()
 
-    async def handle_eof(self):
+    def handle_eof(self):
         # EOF
         print("EOF on TCP socket")
-        await self.reconnect()
+        self.reconnect()
 
-    async def recv(self,n=None):
+    def recv(self,n=None):
         if self.port is None:
-            await self.reconnect()
+            self.reconnect()
+        if not self._is_ready:
+            return b""
         if n is None:
             n = self.mav.bytes_needed()
         try:
             data = self.port.recv(n)
+        except BlockingIOError:
+            return b""
         except socket.error as e:
             if e.errno in [ errno.EAGAIN, errno.EWOULDBLOCK ]:
-                return b""
+                return ""
             if e.errno in [ errno.ECONNRESET, errno.EPIPE ]:
-                await self.handle_disconnect()
-                return b""
+                self.handle_disconnect()
             raise
         if len(data) == 0:
-            await self.handle_eof()
+            self.handle_eof()
 
         return data
 
-    async def recv_msg(self):
-        '''message receive routine'''
-        self.pre_message()
-        while True:
-            n = self.mav.bytes_needed()
-            s = await self.recv(n)
-            numnew = len(s)
-
-            if numnew != 0:
-                if self.logfile_raw:
-                    self.logfile_raw.write(s)
-                if self.first_byte:
-                    self.auto_mavlink_version(s)
-
-            # We always call parse_char even if the new string is empty, because the existing message buf might already have some valid packet
-            # we can extract
-            msg = self.mav.parse_char(s)
-            if msg:
-                if self.logfile and  msg.get_type() != 'BAD_DATA' :
-                    usec = int(time.time() * 1.0e6) & ~3
-                    self.logfile.write(struct.pack('>Q', usec) + msg.get_msgbuf())
-                self.post_message(msg)
-                return msg
-            else:
-                # if we failed to parse any messages _and_ no new bytes arrived, return immediately so the client has the option to
-                # timeout
-                if numnew == 0:
-                    return None
-
-    async def recv_match(self, condition=None, type=None, blocking=False, timeout=None):
-        '''recv the next MAVLink message that matches the given condition
-        type can be a string or a list of strings'''
-        if type is not None and not isinstance(type, list) and not isinstance(type, set):
-            type = [type]
-        start_time = time.time()
-        while True:
-            if timeout is not None:
-                now = time.time()
-                if now < start_time:
-                    start_time = now # If an external process rolls back system time, we should not spin forever.
-                if start_time + timeout < time.time():
-                    return None
-            m = await self.recv_msg()
-            if m is None:
-                if blocking:
-                    for hook in self.idle_hooks:
-                        hook(self)
-                    if timeout is None:
-                        await self.select(0.05)
-                    else:
-                        await self.select(timeout/2)
-                    continue
-                return None
-            if type is not None and not m.get_type() in type:
-                continue
-            if hasattr(m, "get_srcSystem"):
-                if m.get_srcSystem() not in self.sysid_state or not evaluate_condition(condition, self.sysid_state[m.get_srcSystem()].messages):
-                    continue
-            else:
-                if not evaluate_condition(condition, self.messages):
-                    continue
-            return m
-
-    async def write(self, buf):
+    def write(self, buf):
         if self.port is None:
             try:
-                await self.reconnect()
+                self.reconnect()
             except socket.error as e:
                 pass
-        if self.port is None:
+        if self.port is None or not self._is_ready:
             return
-        loop = asyncio.get_running_loop()
         try:
-            await loop.sock_sendall(self.port, buf)
+            self.port.send(buf)
         except socket.error as e:
             if e.errno in [ errno.ECONNRESET, errno.EPIPE ]:
-                await self.handle_disconnect()
+                self.handle_disconnect()
             pass
 
-    async def reconnect(self):
+    def reconnect(self):
+        self._is_ready = False
         if self.autoreconnect:
             print("Attempting reconnect")
             if self.port is not None:
                 self.port.close()
                 self.port = None
-            await self.do_connect()
+                
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+            loop.create_task(self.do_connect())
 
 
 class mavtcpin(mavfile):
