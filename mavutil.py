@@ -7,6 +7,7 @@ Released under GNU LGPL version 3 or later
 from __future__ import annotations
 
 import socket, math, struct, time, os, fnmatch, array, sys, errno
+import select
 import asyncio
 import copy
 import json
@@ -339,6 +340,13 @@ class mavfile:
         if self.fd is None:
             await asyncio.sleep(min(timeout, 0.5))
             return True
+
+        if timeout == 0:
+            try:
+                (rin, win, xin) = select.select([self.fd], [], [], 0)
+                return len(rin) == 1
+            except Exception:
+                return False
 
         loop = asyncio.get_running_loop()
         future = loop.create_future()
