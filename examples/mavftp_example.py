@@ -7,6 +7,7 @@ SPDX-FileCopyrightText: 2024 Amilcar Lucas
 
 SPDX-License-Identifier: GPL-3.0-or-later
 '''
+import asyncio
 
 from argparse import ArgumentParser
 
@@ -106,10 +107,10 @@ def auto_connect(device):
     return comport
 
 
-def wait_heartbeat(m):
+async def wait_heartbeat(m):
     '''wait for a heartbeat so we know the target system IDs'''
     logging_info("Waiting for flight controller heartbeat")
-    m.wait_heartbeat()
+    await m.wait_heartbeat()
     logging_info("Got heartbeat from system %u, component %u", m.target_system, m.target_system)
 # pylint: enable=duplicate-code
 
@@ -119,23 +120,23 @@ def delete_local_file_if_exists(filename):
         os.remove(filename)
 
 
-def get_list_dir(mav_ftp, directory):
-    ret = mav_ftp.cmd_list([directory])
+async def get_list_dir(mav_ftp, directory):
+    ret = await mav_ftp.cmd_list([directory])
     ret.display_message()
     debug_class_member_variable_changes(mav_ftp)
 
 
-def get_file(mav_ftp, remote_filename, local_filename, timeout=5):
+async def get_file(mav_ftp, remote_filename, local_filename, timeout=5):
     #session = mav_ftp.session # save the session to restore it after the file transfer
     mav_ftp.cmd_get([remote_filename, local_filename])
-    ret = mav_ftp.process_ftp_reply('OpenFileRO', timeout=timeout)
+    ret = await mav_ftp.process_ftp_reply('OpenFileRO', timeout=timeout)
     ret.display_message()
     #mav_ftp.session = session # FIXME: this is a huge workaround hack # pylint: disable=fixme
     debug_class_member_variable_changes(mav_ftp)
-    #time.sleep(0.2)
+    #await asyncio.sleep(0.2)
 
 
-def get_last_log(mav_ftp):
+async def get_last_log(mav_ftp):
     try:
         with open('LASTLOG.TXT', 'r', encoding='UTF-8') as file:
             file_contents = file.readline()
@@ -148,7 +149,7 @@ def get_last_log(mav_ftp):
         return
     remote_filenumber = remote_filenumber - 1 # we do not want the very last log
     remote_filename = f'/APM/LOGS/{remote_filenumber:08}.BIN'
-    get_file(mav_ftp, remote_filename, 'LASTLOG.BIN', 0)
+    await get_file(mav_ftp, remote_filename, 'LASTLOG.BIN', 0)
 
 
 def download_script(url, local_filename):
@@ -162,22 +163,22 @@ def download_script(url, local_filename):
         logging_error("Failed to download the file")
 
 
-def create_directory(mav_ftp, remote_directory):
-    ret = mav_ftp.cmd_mkdir([remote_directory])
+async def create_directory(mav_ftp, remote_directory):
+    ret = await mav_ftp.cmd_mkdir([remote_directory])
     ret.display_message()
     debug_class_member_variable_changes(mav_ftp)
 
 
-def remove_directory(mav_ftp, remote_directory):
-    ret = mav_ftp.cmd_rmdir([remote_directory])
+async def remove_directory(mav_ftp, remote_directory):
+    ret = await mav_ftp.cmd_rmdir([remote_directory])
     ret.display_message()
     debug_class_member_variable_changes(mav_ftp)
 
 
-def upload_script(mav_ftp, remote_directory, local_filename, timeout):
+async def upload_script(mav_ftp, remote_directory, local_filename, timeout):
     # Upload it from the PC to the flight controller
     mav_ftp.cmd_put([local_filename, remote_directory + '/' + local_filename])
-    ret = mav_ftp.process_ftp_reply('CreateFile', timeout=timeout)
+    ret = await mav_ftp.process_ftp_reply('CreateFile', timeout=timeout)
     ret.display_message()
     debug_class_member_variable_changes(mav_ftp)
 
@@ -203,7 +204,7 @@ def debug_class_member_variable_changes(instance):
                     logging_info(f"CHANGED {key}: {old_mavftp_member_variable_values[key]} -> {value}")
     old_mavftp_member_variable_values = new_mavftp_member_variable_values.copy()
 
-def main():
+async def main():
     '''for testing/example purposes only'''
     args = argument_parser()
 
@@ -214,11 +215,12 @@ def main():
     master = mavutil.mavlink_connection(comport.device, baud=args.baudrate, source_system=args.source_system)
 
     # wait for the heartbeat msg to find the system ID
-    wait_heartbeat(master)
+    await wait_heartbeat(master)
 
     mav_ftp = mavftp.MAVFTP(master,
                             target_system=master.target_system,
                             target_component=master.target_component)
+    await mav_ftp.initialize()
 
     mav_ftp.ftp_settings.debug = args.debug
 
@@ -227,34 +229,34 @@ def main():
 
     debug_class_member_variable_changes(mav_ftp)
 
-    get_list_dir(mav_ftp, '/APM/LOGS')
+    await get_list_dir(mav_ftp, '/APM/LOGS')
 
     delete_local_file_if_exists("params.param")
     delete_local_file_if_exists("defaults.param")
     mav_ftp.cmd_getparams(["params.param", "defaults.param"])
-    ret = mav_ftp.process_ftp_reply('OpenFileRO', timeout=500)
+    ret = await mav_ftp.process_ftp_reply('OpenFileRO', timeout=500)
     ret.display_message()
 
-    get_list_dir(mav_ftp, '/APM/LOGS')
+    await get_list_dir(mav_ftp, '/APM/LOGS')
 
     #delete_local_file_if_exists("LASTLOG.TXT")
     delete_local_file_if_exists("LASTLOG.BIN")
 
-    #get_file(mav_ftp, '/APM/LOGS/LASTLOG.TXT', 'LASTLOG.TXT')
+    #await get_file(mav_ftp, '/APM/LOGS/LASTLOG.TXT', 'LASTLOG.TXT')
 
-    get_list_dir(mav_ftp, '/APM/LOGS')
+    await get_list_dir(mav_ftp, '/APM/LOGS')
 
-    #get_file(mav_ftp, '/APM/LOGS/LASTLOG.TXT', 'LASTLOG2.TXT')
+    #await get_file(mav_ftp, '/APM/LOGS/LASTLOG.TXT', 'LASTLOG2.TXT')
 
-    get_last_log(mav_ftp)
+    await get_last_log(mav_ftp)
 
-    remove_directory(mav_ftp, "test_dir")
-    create_directory(mav_ftp, "test_dir")
-    remove_directory(mav_ftp, "test_dir")
-    create_directory(mav_ftp, "test_dir2")
+    await remove_directory(mav_ftp, "test_dir")
+    await create_directory(mav_ftp, "test_dir")
+    await remove_directory(mav_ftp, "test_dir")
+    await create_directory(mav_ftp, "test_dir2")
 
     remote_directory = '/APM/Scripts'
-    #create_directory(mav_ftp, remote_directory)
+    #await create_directory(mav_ftp, remote_directory)
 
     url = "https://discuss.ardupilot.org/uploads/short-url/4pyrl7PcfqiMEaRItUhljuAqLSs.lua"
     local_filename = "copter-magfit-helper.lua"
@@ -262,7 +264,7 @@ def main():
     if not os.path.exists(local_filename):
         download_script(url, local_filename)
 
-    upload_script(mav_ftp, remote_directory, local_filename, 5)
+    await upload_script(mav_ftp, remote_directory, local_filename, 5)
 
     url = "https://raw.githubusercontent.com/ArduPilot/ardupilot/Copter-4.5/libraries/AP_Scripting/applets/" \
             "VTOL-quicktune.lua"
@@ -271,10 +273,10 @@ def main():
     if not os.path.exists(local_filename):
         download_script(url, local_filename)
 
-    upload_script(mav_ftp, remote_directory, local_filename, 5)
+    await upload_script(mav_ftp, remote_directory, local_filename, 5)
 
     master.close()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

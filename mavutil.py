@@ -1235,7 +1235,9 @@ class mavmcast(mavfile):
     
 
 class mavtcp(mavfile):
-    '''a TCP mavlink socket'''
+    '''a TCP mavlink socket
+    
+    Warning: After creating an instance of mavtcp, always do "mavtcp.initialize()"'''
     def __init__(self,
                  device,
                  autoreconnect=False,
@@ -1243,6 +1245,7 @@ class mavtcp(mavfile):
                  source_component=0,
                  retries=6,
                  use_native=default_native):
+        '''Warning: After creating an instance of mavtcp, always do "mavtcp.initialize()"'''
         a = device.split(':')
         if len(a) != 2:
             raise ValueError("TCP ports must be specified as host:port")
@@ -1251,11 +1254,18 @@ class mavtcp(mavfile):
         self.autoreconnect = autoreconnect
 
         self.retries = retries
-        self.do_connect()
 
-        mavfile.__init__(self, self.port.fileno(), "tcp:" + device, source_system=source_system, source_component=source_component, use_native=use_native)
+        self._device_name = device
+        self._source_system = source_system
+        self._source_component = source_component
+        self._use_native = use_native
 
-    def do_connect(self):
+    async def initialize(self):
+        await self.do_connect()
+
+        mavfile.__init__(self, self.port.fileno(), "tcp:" + self._device_name, source_system=self._source_system, source_component=self._source_component, use_native=self._use_native)
+
+    async def do_connect(self):
         if sys.platform != 'darwin':
             self.port = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         retries = self.retries
@@ -1276,7 +1286,7 @@ class mavtcp(mavfile):
                         self.port = None
                     raise e
                 print(e, "sleeping")
-                time.sleep(1)
+                await asyncio.sleep(1)
         self.port.setblocking(0)
         set_close_on_exec(self.port.fileno())
         self.port.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
@@ -1284,18 +1294,18 @@ class mavtcp(mavfile):
     def close(self):
         self.port.close()
 
-    def handle_disconnect(self):
+    async def handle_disconnect(self):
         print("Connection reset or closed by peer on TCP socket")
-        self.reconnect()
+        await self.reconnect()
 
-    def handle_eof(self):
+    async def handle_eof(self):
         # EOF
         print("EOF on TCP socket")
-        self.reconnect()
+        await self.reconnect()
 
-    def recv(self,n=None):
+    async def recv(self,n=None):
         if self.port is None:
-            self.reconnect()
+            await self.reconnect()
         if n is None:
             n = self.mav.bytes_needed()
         try:
@@ -1304,17 +1314,17 @@ class mavtcp(mavfile):
             if e.errno in [ errno.EAGAIN, errno.EWOULDBLOCK ]:
                 return ""
             if e.errno in [ errno.ECONNRESET, errno.EPIPE ]:
-                self.handle_disconnect()
+                await self.handle_disconnect()
             raise
         if len(data) == 0:
-            self.handle_eof()
+            await self.handle_eof()
 
         return data
 
-    def write(self, buf):
+    async def write(self, buf):
         if self.port is None:
             try:
-                self.reconnect()
+                await self.reconnect()
             except socket.error as e:
                 pass
         if self.port is None:
@@ -1323,16 +1333,16 @@ class mavtcp(mavfile):
             self.port.send(buf)
         except socket.error as e:
             if e.errno in [ errno.ECONNRESET, errno.EPIPE ]:
-                self.handle_disconnect()
+                await self.handle_disconnect()
             pass
 
-    def reconnect(self):
+    async def reconnect(self):
         if self.autoreconnect:
             print("Attempting reconnect")
             if self.port is not None:
                 self.port.close()
                 self.port = None
-            self.do_connect()
+            await self.do_connect()
 
 
 class mavtcpin(mavfile):
@@ -2634,9 +2644,9 @@ class MavlinkSerialPort(object):
         '''an object that looks like a serial port, but
         transmits using mavlink SERIAL_CONTROL packets
         
-        Warning: After creating an instance of MavlinkSerialPort, always do "await port.connect()"'''
+        Warning: After creating an instance of MavlinkSerialPort, always do "MavlinkSerialPort.connect()"'''
         def __init__(self, portname, baudrate, devnum=0, devbaud=0, timeout=3, debug=0):
-                '''Warning: After creating an instance of MavlinkSerialPort, always do "await port.connect()"'''
+                '''Warning: After creating an instance of MavlinkSerialPort, always do "asyncio.connect()"'''
                 self.baudrate = baudrate
                 self.timeout = timeout
                 self._debug = debug

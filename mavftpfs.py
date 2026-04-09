@@ -3,6 +3,7 @@
 import errno
 import os
 import time
+import asyncio
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from typing import Any, Dict, Optional
 
@@ -17,6 +18,7 @@ base_file_paths = ["/", "@ROMFS", "@SYS"]
 
 
 class FTP(LoggingMixIn, Operations):
+    """Warning: After creating an instance of FTP, always run 'FTP.initialize()'"""
     def __init__(self, mav: Any) -> None:
         self.mav = mav
         self.missing_files = []
@@ -36,12 +38,15 @@ class FTP(LoggingMixIn, Operations):
         }
         self.ftp = MAVFTP(mav, target_system=mav.target_system, target_component=mav.target_component)
 
+    async def initialize(self):
+        await self.ftp.initialize()
+
     def fix_path(self, path: str) -> str:
         if path.startswith("/@"):
             return path[1:]
         return path
 
-    def getattr(self, path: str, _fh: int = 0) -> Any:
+    async def getattr(self, path: str, _fh: int = 0) -> Any:
         path_fixed = self.fix_path(path)
         # logger.info(f"Fuse: getattr {path_fixed}")
         if path_fixed in self.missing_files:
@@ -50,15 +55,15 @@ class FTP(LoggingMixIn, Operations):
             return self.files[path_fixed]
 
         parent_dir = ("/" + "/".join(path.split("/")[:-1])).replace("//", "/")
-        self.readdir(parent_dir)
+        await self.readdir(parent_dir)
         if path not in self.files:
             self.missing_files.append(path)
             raise FuseOSError(errno.ENOENT)
         return self.files[path]
 
-    def read(self, path: str, size: int, offset: int, _fh: int = 0) -> Optional[bytes]:
+    async def read(self, path: str, size: int, offset: int, _fh: int = 0) -> Optional[bytes]:
         logger.info(f"Fuse: read {path}, size={size}, offset={offset}")
-        buf = self.ftp.read_sector(self.fix_path(path), offset, size)
+        buf = await self.ftp.read_sector(self.fix_path(path), offset, size)
         return buf
 
     def cleaned_up_path(self, dir_path, current_path):
@@ -85,7 +90,7 @@ class FTP(LoggingMixIn, Operations):
 
         return remmaped_dict
 
-    def readdir(self, path: str, _fh: int = 0) -> Any:
+    async def readdir(self, path: str, _fh: int = 0) -> Any:
         path_fixed = self.fix_path(path)
         if self.files.get(path) is not None:
             last_update = self.files[path].get("ftp_last_update")
@@ -95,7 +100,7 @@ class FTP(LoggingMixIn, Operations):
             if time.time() - last_update < self.cache_duration:
                 return self.get_cached_dir_list(path)
         logger.warning(f"cache miss for {path_fixed}")
-        self.ftp.cmd_list([path_fixed])
+        await self.ftp.cmd_list([path_fixed])
         directory = self.ftp.list_result
         if directory is None or len(directory) == 0:
             return []
@@ -163,7 +168,7 @@ class FTP(LoggingMixIn, Operations):
         raise FuseOSError(errno.EROFS)
 
 
-if __name__ == "__main__":
+async def main():
     # logging.basicConfig(level=logging.DEBUG)
     parser = ArgumentParser(description="MAVLink FTP", formatter_class=ArgumentDefaultsHelpFormatter)
     parser.add_argument(
@@ -190,3 +195,7 @@ if __name__ == "__main__":
         nothreads=True,
         allow_other=True,
     )
+    await fuse.initialize()
+
+if __name__ == "__main__":
+    asyncio.run(main())
